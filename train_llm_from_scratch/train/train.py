@@ -1,21 +1,14 @@
 import math
-from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
-import os
-import pandas as pd
 
-from torch.utils.data import IterableDataset, Dataset
-import json
-import numpy as np
 from transformers import  PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import PretrainedConfig
-from transformers import Trainer, TrainingArguments, AutoModelForCausalLM, AutoTokenizer, DefaultDataCollator, DataCollatorForTokenClassification, AutoConfig
-from dataset import SFTDataset, LLMDataset
-
+from transformers import Trainer, TrainingArguments, AutoTokenizer, DefaultDataCollator
+from train_llm_from_scratch.dataset import LLMDataset
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -292,12 +285,12 @@ if __name__ == '__main__':
     # print(count_parameters(model))
 
     data_collator = DefaultDataCollator()
-    tokenizer = AutoTokenizer.from_pretrained("./tokenizer", use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained("../tokenizer", use_fast=True)
     args = TrainingArguments(output_dir='./results2048',
                             num_train_epochs=10,
                             do_train=True,
-                            per_device_train_batch_size=128,
-                            gradient_accumulation_steps=8,
+                            per_device_train_batch_size=32,
+                            gradient_accumulation_steps=32,
                             # max_steps=15000,
                             logging_steps=100,
                             report_to='tensorboard',
