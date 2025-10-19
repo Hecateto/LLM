@@ -1,3 +1,5 @@
+import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 from accelerate import optimizer
 from transformers import AutoModelForCausalLM, AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 from dataclasses import dataclass
@@ -8,6 +10,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
+
 
 class PromptDataset(Dataset):
     def __init__(self, prompts, tokenizer, apply_chat_template=False):
@@ -20,13 +23,14 @@ class PromptDataset(Dataset):
                 prompt = self.tokenizer.apply_chat_template(content, tokenize=False, add_generation_prompt=True)
             else:
                 prompt = self.tokenizer.bos_token + prompt
-                self.final_prompts.append(prompt)
+            self.final_prompts.append(prompt)
 
     def __len__(self):
         return len(self.prompts)
 
     def __getitem__(self, idx):
         return self.final_prompts[idx]
+
 
 class Critic(nn.Module):
     def __init__(self, base_model):
@@ -45,6 +49,7 @@ class Critic(nn.Module):
         values = value_model_output.squeeze(-1)[:, -num_actions:]
         return values
 
+
 def compute_policy_loss(log_probs, old_log_probs, advantages, action_mask=None, clip_eps=0.2):
     # 计算PPO的策略损失
     ratios = torch.exp(log_probs - old_log_probs)
@@ -55,6 +60,7 @@ def compute_policy_loss(log_probs, old_log_probs, advantages, action_mask=None, 
         # loss: [batch_size, seq_length] -> [batch_size] -> scalar
         return loss.mean(-1).mean()
     return ((loss * action_mask).sum(-1) / action_mask.sum(-1)).mean()
+
 
 def compute_value_loss(values, old_values, returns, action_mask=None, clip_eps=0.2):
     if clip_eps is not None:
@@ -74,6 +80,7 @@ def compute_value_loss(values, old_values, returns, action_mask=None, clip_eps=0
         return loss.mean(-1).mean()
     return ((loss * action_mask).sum(-1) / action_mask.sum(-1)).mean()
 
+
 @dataclass
 class Samples:
     # 表示一次经验采样的结果
@@ -81,9 +88,10 @@ class Samples:
     attn_mask: Optional[torch.LongTensor]
     action_mask: Optional[torch.BoolTensor]
     num_actions: Union[int, torch.Tensor]
-    packed_seq_lens: Optional[torch.Tensor] # 表示每个序列的实际长度（不包括填充部分）
+    packed_seq_lens: Optional[torch.Tensor]  # 表示每个序列的实际长度（不包括填充部分）
     response_length: torch.Tensor
     total_length: torch.Tensor
+
 
 @dataclass
 class Experience:
@@ -100,7 +108,8 @@ class Experience:
     response_length: torch.Tensor
     total_length: torch.Tensor
     num_actions: Union[int, torch.Tensor]
-    kl: Optional[torch.Tensor] = None   # 策略与参考模型之间的KL散度
+    kl: Optional[torch.Tensor] = None  # 策略与参考模型之间的KL散度
+
 
 class ExperienceBuffer:
     def __init__(self, limit):
@@ -141,6 +150,7 @@ class ExperienceBuffer:
     def __getitem__(self, idx):
         return self.buffer[idx]
 
+
 @dataclass
 class BufferItem:
     # 用于将多个Experience对象合并成一个批处理对象
@@ -153,35 +163,75 @@ class BufferItem:
     action_mask: Optional[torch.Tensor]
     num_actions: Union[int, torch.Tensor]
 
+
 def collate_fn(batch):
-    # batch是一个Experience的列表
-    # 该函数的作用是将多个Experience对象合并成一个BufferItem对象，方便后续批处理
-    seqs = []
-    action_log_probs = []
-    values = []
-    returns = []
-    advantages = []
-    attn_masks = []
-    action_masks = []
+    # 1. 提取所有数据
+    seqs = [x['seqs'] for x in batch]
+    action_log_probs = [x['action_log_probs'] for x in batch]
+    values = [x['values'] for x in batch]
+    returns = [x['returns'] for x in batch]
+    advantages = [x['advantages'] for x in batch]
+    attn_masks = [x['attn_mask'] for x in batch]
+    action_masks = [x['action_mask'] for x in batch]
 
-    for x in batch:
-        seqs.append(x['seqs'])
-        action_log_probs.append(x['action_log_probs'])
-        values.append(x['values'])
-        returns.append(x['returns'])
-        advantages.append(x['advantages'])
-        attn_masks.append(x['attn_mask'])
-        action_masks.append(x['action_mask'])
+    # 2. 确定批次中的最大响应长度
+    # 奖励、价值等张量维度为 (batch_size, response_length)
+    max_response_len = max(t.size(1) for t in action_log_probs)
 
-    seqs = torch.cat(seqs, dim=0)
-    action_log_probs = torch.cat(action_log_probs, dim=0)
-    values = torch.cat(values, dim=0)
-    returns = torch.cat(returns, dim=0)
-    advantages = torch.cat(advantages, dim=0)
-    attn_masks = torch.cat(attn_masks, dim=0)
-    action_masks = torch.cat(action_masks, dim=0)
+    # 3. 对所有 (batch_size, response_length) 的张量进行填充
+    padded_action_log_probs = []
+    padded_values = []
+    padded_returns = []
+    padded_advantages = []
+    padded_action_masks = []
 
-    return BufferItem(seqs, action_log_probs, values, returns, advantages, attn_masks, action_masks)
+    for log_probs, val, ret, adv, mask in zip(action_log_probs, values, returns, advantages, action_masks):
+        current_len = log_probs.size(1)
+        padding_len = max_response_len - current_len
+
+        # 定义填充值：对数概率、价值、回报、优势等填充为0
+        # 注意：mask需要填充为0 (False)
+
+        # 填充动作对数概率 (log_probs)
+        padded_log_probs = F.pad(log_probs, (0, padding_len), 'constant', 0)
+        padded_action_log_probs.append(padded_log_probs)
+
+        # 填充价值、回报、优势
+        padded_values.append(F.pad(val, (0, padding_len), 'constant', 0))
+        padded_returns.append(F.pad(ret, (0, padding_len), 'constant', 0))
+        padded_advantages.append(F.pad(adv, (0, padding_len), 'constant', 0))
+
+        # 填充动作掩码 (mask)，注意类型
+        # action_mask 原本是 BoolTensor，但你在前面代码中转成了 LongTensor，所以这里用0填充
+        padded_mask = F.pad(mask.float(), (0, padding_len), 'constant', 0).long()
+        padded_action_masks.append(padded_mask)
+
+    # 4. 拼接所有数据
+    seqs = torch.cat(seqs, dim=0)  # [B, T_total]
+    attn_masks = torch.cat(attn_masks, dim=0)  # [B, T_total]
+
+    # 拼接填充后的张量 [B, T_response_max]
+    final_action_log_probs = torch.cat(padded_action_log_probs, dim=0)
+    final_values = torch.cat(padded_values, dim=0)
+    final_returns = torch.cat(padded_returns, dim=0)
+    final_advantages = torch.cat(padded_advantages, dim=0)
+    final_action_masks = torch.cat(padded_action_masks, dim=0)
+
+    # 这里的 num_actions 应该是 batch 中最大的响应长度
+    num_actions = max_response_len
+
+    # 5. 返回 BufferItem
+    return BufferItem(
+        seqs,
+        final_action_log_probs,
+        final_values,
+        final_returns,
+        final_advantages,
+        attn_masks,
+        final_action_masks,
+        num_actions
+    )
+
 
 def train_step(experience, steps):
     actor_model.train()
@@ -197,11 +247,11 @@ def train_step(experience, steps):
     returns = experience.returns
 
     # 计算当前策略下的动作对数概率
-    logits = actor_model(sequences, attention_mask=attn_mask).logits # [batch_size, seq_length, vocab_size]
+    logits = actor_model(sequences, attention_mask=attn_mask).logits  # [batch_size, seq_length, vocab_size]
     log_probs = F.log_softmax(logits, dim=-1)
     # gather: 根据sequences[:,1:]中的token ID, 从log_probs中提取对应的对数概率
     # sequences.unsqueeze(-1): [batch_size, seq_length] -> [batch_size, seq_length, 1]
-    log_probs_labels = log_probs.gather(dim=-1, index=sequences[:,1:].unsqueeze(-1))
+    log_probs_labels = log_probs.gather(dim=-1, index=sequences[:, 1:].unsqueeze(-1))
     # 只取动作对应的对数概率
     action_log_probs = log_probs_labels.squeeze(-1)[:, -num_actions:]
 
@@ -227,6 +277,7 @@ def train_step(experience, steps):
     writer.add_scalar('value_loss', value_loss.item(), steps)
     print(f"step: {steps}, policy_loss: {policy_loss.item():.4f}, value_loss: {value_loss.item():.4f}")
 
+
 def compute_approx_kl(
         log_probs: torch.Tensor,
         ref_log_probs: torch.Tensor,
@@ -237,12 +288,13 @@ def compute_approx_kl(
         log_ratio = log_ratio * action_mask
     return log_ratio
 
+
 def get_advantanges_and_returns(
-    values: torch.Tensor,   # [batch_size, response_length]
-    rewards: torch.Tensor,
-    action_mask: torch.Tensor,
-    gamma: float,
-    lambd: float
+        values: torch.Tensor,  # [batch_size, response_length]
+        rewards: torch.Tensor,
+        action_mask: torch.Tensor,
+        gamma: float,
+        lambd: float
 ):
     # 计算GAE优势和回报
     lastGAElam = 0
@@ -278,6 +330,7 @@ def get_advantanges_and_returns(
     returns = advantages + values
     return advantages.detach(), returns
 
+
 def generate_samples(prompts, model, max_length, max_new_tokens, n_samples_per_prompt, micro_rollout_batch_size):
     # 根据提示词生成样本
     samples_list = []
@@ -285,7 +338,7 @@ def generate_samples(prompts, model, max_length, max_new_tokens, n_samples_per_p
     all_prompts = sum([[prompt] * n_samples_per_prompt for prompt in prompts], [])
     for i in range(0, len(all_prompts), micro_rollout_batch_size):
         # micro_rollout_batch_size: 每次取多少条经验生成经验
-        prompts = all_prompts[i:i+micro_rollout_batch_size]
+        prompts = all_prompts[i:i + micro_rollout_batch_size]
         inputs = actor_tokenizer(prompts, padding=True, truncation=True, return_tensors='pt')
         input_ids = inputs['input_ids']
         # **将字典解包为关键字参数传递给函数
@@ -328,13 +381,14 @@ def compute_rewards(kl, r, action_mask, kl_ctl, clip_reward_value):
     ends = action_mask.sum(1) + 1
     if not isinstance(clip_reward_value, torch.Tensor):
         clip_reward_value = torch.tensor(clip_reward_value).to(r.device)
-    reward_clip = torch.clamp(r, -clip_reward_value, clip_reward_value) # [batch_size, 1]
+    reward_clip = torch.clamp(r, -clip_reward_value, clip_reward_value)  # [batch_size, 1]
 
     batch_size = r.size(0)
     # 把外部奖励值加到每个序列的最后一个有效动作位置上
     for j in range(batch_size):
         rewards[j, :ends[j]][-1] += reward_clip[j, 0]
     return rewards
+
 
 def generate_experiences(samples_list):
     actor_model.eval()
@@ -344,22 +398,22 @@ def generate_experiences(samples_list):
 
     experiences = []
     for samples in samples_list:
-        seqs = samples.seqs # [batch_size, seq_length]
+        seqs = samples.seqs  # [batch_size, seq_length]
         attn_mask = samples.attn_mask
         action_mask = samples.action_mask
         num_actions = samples.num_actions
 
         with torch.no_grad():
             # 计算当前策略下的动作对数概率
-            logits = actor_model(seqs, attention_mask=attn_mask).logits # [batch_size, seq_length, vocab_size]
+            logits = actor_model(seqs, attention_mask=attn_mask).logits  # [batch_size, seq_length, vocab_size]
             log_probs = F.log_softmax(logits[:, :-1, :], dim=-1)
-            log_probs_labels = log_probs.gather(dim=-1, index=seqs[:,1:].unsqueeze(-1))
+            log_probs_labels = log_probs.gather(dim=-1, index=seqs[:, 1:].unsqueeze(-1))
             action_log_probs = log_probs_labels.squeeze(-1)[:, -num_actions:]
 
             # 计算参考模型下的动作对数概率
             ref_logits = ref_model(samples.seqs, attention_mask=attn_mask).logits
             ref_log_probs = F.log_softmax(ref_logits[:, :-1, :], dim=-1)
-            ref_log_probs_labels = ref_log_probs.gather(dim=-1, index=samples.seqs[:,1:].unsqueeze(-1))
+            ref_log_probs_labels = ref_log_probs.gather(dim=-1, index=samples.seqs[:, 1:].unsqueeze(-1))
             ref_action_log_probs = ref_log_probs_labels.squeeze(-1)[:, -samples.num_actions:]
 
             # 计算价值估计
@@ -367,7 +421,7 @@ def generate_experiences(samples_list):
             # 计算外部奖励r, 对生成的完整文本（seq_texts）打分
             seq_texts = actor_tokenizer.batch_decode(seqs, skip_special_tokens=True)
             reward_model_inputs = reward_tokenizer(seq_texts, return_tensors="pt", padding=True)
-            r = reward_model(**reward_model_inputs.to(device)).logits   # [batch_size, num_labels]
+            r = reward_model(**reward_model_inputs.to(device)).logits  # [batch_size, num_labels]
             # 计算KL散度(action-ref)
             kl = compute_approx_kl(
                 action_log_probs,
@@ -407,7 +461,7 @@ def generate_experiences(samples_list):
             kl=kl.detach()
         )
         experiences.append(experience)
-
+    return experiences
 
 
 def train():
@@ -434,21 +488,22 @@ def train():
             buffer.clear()
             torch.cuda.empty_cache()
 
+
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     episodes = 3
     max_epochs = 5
-    rollout_batch_size = 8 # 每次从提示词数据集中采样的数量用于生成经验
-    micro_rollout_batch_size = 2 # 每次取多少条经验生成经验
-    n_samples_per_prompt = 2 # 每个提示词生成多少条经验
+    rollout_batch_size = 8  # 每次从提示词数据集中采样的数量用于生成经验
+    micro_rollout_batch_size = 2  # 每次取多少条经验生成经验
+    n_samples_per_prompt = 2  # 每个提示词生成多少条经验
     max_new_tokens = 50
     max_length = 256
     micro_train_batch_size = 2  # 每次训练取多少条经验
-    writer = SummaryWriter('./runs')    # TensorBoard日志记录器
+    writer = SummaryWriter('./runs')  # TensorBoard日志记录器
 
-    actor_path = ''
-    ref_path = ''
-    reward_path = ''
+    actor_path = "Qwen/Qwen2-0.5B-Instruct"
+    ref_path = "Qwen/Qwen2-0.5B-Instruct"
+    reward_path = "OpenAssistant/reward-model-deberta-v3-large-v2"
     # models
     actor_model = AutoModelForCausalLM.from_pretrained(actor_path).to(device)
     ref_model = AutoModelForCausalLM.from_pretrained(ref_path).to(device)
