@@ -305,7 +305,6 @@ def get_advantanges_and_returns(
         values = action_mask * values
         rewards = action_mask * rewards
 
-    # A(t) = R(t) + γV(t+1) - V(t)
     # R(t)表示在时间步t获得的即时奖励, V(t)表示在时间步t的状态价值估计, V(t+1)表示在时间步t+1的状态价值估计
     # GAE优势计算公式: A(t) = δ(t) + γλA(t+1)
     # 其中, δ(t) = R(t) + γV(t+1) - V(t)
@@ -377,7 +376,8 @@ def compute_rewards(kl, r, action_mask, kl_ctl, clip_reward_value):
     # kl_ctl: 控制KL散度的系数, r: 奖励值, kl: KL散度 [batch_size, seq_length]
     kl_divergence_estimate = -kl_ctl * kl
     rewards = kl_divergence_estimate
-    # .sum(1): [batch_size], +1 定位到最后一个有效动作的位置
+    # action_mask.sum(1): [batch_size, seq_length] -> [batch_size], 计算每个序列中有效动作的数量
+    # +1 定位到最后一个有效动作的位置
     ends = action_mask.sum(1) + 1
     if not isinstance(clip_reward_value, torch.Tensor):
         clip_reward_value = torch.tensor(clip_reward_value).to(r.device)
@@ -385,6 +385,7 @@ def compute_rewards(kl, r, action_mask, kl_ctl, clip_reward_value):
 
     batch_size = r.size(0)
     # 把外部奖励值加到每个序列的最后一个有效动作位置上
+    # rewards: [batch_size, seq_length]
     for j in range(batch_size):
         rewards[j, :ends[j]][-1] += reward_clip[j, 0]
     return rewards

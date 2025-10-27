@@ -280,7 +280,7 @@ class GRPOTrainer:
         }
 
     def get_action_log_probs(self, model, input_ids, attn_mask, num_actions):
-        logits = model(input_ids=input_ids, attention_mask=attn_mask).logits
+        logits = model(input_ids=input_ids, attention_mask=attn_mask).logits    # [b, s, vocab_size]
         log_probs = F.log_softmax(logits[:, :-1, :], dim=-1)
         log_probs_labels = log_probs.gather(dim=-1, index=input_ids[:, 1:].unsqueeze(-1))   # [b, s-1, 1]
         action_log_probs = log_probs_labels.squeeze(-1)[:, -num_actions:]  # [b, num_actions]
