@@ -324,7 +324,9 @@ def get_advantanges_and_returns(
         advantages_reversed.append(lastGAElam)
     advantages = torch.stack(advantages_reversed[::-1], dim=1)
     # returns表示从当前时间步t开始到未来所有时间步的累计奖励
-    # returns(t) = A(t) + V(t) = R(t) + γV(t+1) - V(t) + V(t) = R(t) + γV(t+1) + γλA(t+1) = R(t) + γ*returns(t+1)
+    # returns(t) = A(t) + V(t) = δ(t) + γλA(t+1) + V(t)
+    # = R(t) + γV(t+1) - V(t) + γλA(t+1) + V(t)
+    # = R(t) + γV(t+1) + γλA(t+1)
     # 这里returns(t)和A(t)在最大t时的表达相同.                          (·)
     returns = advantages + values
     return advantages.detach(), returns
