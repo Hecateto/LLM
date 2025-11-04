@@ -294,6 +294,14 @@ class GRPOTrainer:
         action_log_probs = self.get_action_log_probs(model, prompt_response_ids, attn_mask, num_actions)
 
         if self.args.beta != 0.0:
+            '''
+            k3估计器也是KL(pi | ref)的无偏估计. p:ref, q:pi, KL(q | p)
+            r = p(x) / q(x)
+            k1 = log(q/p) = -log(r), E[k1] = E[log(q/p)] = KL(q | p), 无偏估计(即直接对数差),高方差
+            k2 = 1/2 * (log(p/q))^2 = 1/2 * (log(r))^2, 有偏估计, 有方差
+            k3 = p/q - 1 - log(p/q) = (r-1) - log(r) = (r-1) + k1, 无偏估计,稳定
+            E[k3] = E[r-1] + E[k1], 这里E[r] = E[p/q] = 1
+            '''
             # KL( ref | pi ) = E[log(ref) - log(pi)] = E[log_ratio]
             ref_action_log_probs = inputs['ref_action_log_probs']
             log_ratio = ref_action_log_probs - action_log_probs
