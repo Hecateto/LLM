@@ -245,6 +245,10 @@ class GatedDeltaNet(nn.Module):
         projected_states_qkvz = self.in_proj_qkvz(x)
         projected_states_ba = self.in_proj_ba(x)
 
+        '''
+        Q,K,V,Z = split(QKVZ) = split(W_qkvz h)
+        b,a = split(BA) = split(W_ba h)
+        '''
         query, key, value, z = torch.split(
             projected_states_qkvz,
             [self.key_dim, self.key_dim, self.value_dim, self.value_dim], dim=-1
@@ -286,7 +290,9 @@ class GatedDeltaNet(nn.Module):
         key = key.reshape(bs, s, -1, self.head_k_dim)
         value = value.reshape(bs, s, -1, self.head_v_dim)
 
-        beta = b.sigmoid()
+        beta = b.sigmoid()  # beta = sigmoid(b)
+        # g = -exp(A_log) * softplus(a + dt_bias)
+        # softplus(x) = log(1 + exp(x))
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 
         if self.num_v_heads // self.num_k_heads > 1:
@@ -316,13 +322,18 @@ class GatedDeltaNet(nn.Module):
             q_t = query[:, :, i]
             k_t = key[:, :, i]
             v_t = value[:, :, i]
-            g_t = g[:, :, i].exp().unsqueeze(-1).unsqueeze(-1)
+            g_t = g[:, :, i].exp().unsqueeze(-1).unsqueeze(-1)  # alpha_t = exp(g_t)
             beta_t = beta[:, :, i].unsqueeze(-1)
 
             last_recurrent_state = last_recurrent_state * g_t  # S_{t-1} * alpha_t
             kv_mem = (last_recurrent_state * k_t.unsqueeze(-1)).sum(dim=-2)  # S_{t-1} * alpha_t * k_t
             delta = beta_t * (v_t - kv_mem)  # beta_t * (v_t - S_{t-1} * alpha_t * k_t)
-            last_recurrent_state += k_t.unsqueeze(-1) * delta.unsqueeze(-2) # S_{t-1} * alpha_t * (I - beta_t k_t k_t^T) + beta_t v_t k_t^T
+            '''
+            = S_{t-1} * alpha_t + beta_t * (v_t - S_{t-1} * alpha_t * k_t) * k_t^T
+            = S_{t-1} * alpha_t * (I - beta_t k_t k_t^T) + beta_t v_t k_t^T
+            '''
+            #
+            last_recurrent_state += k_t.unsqueeze(-1) * delta.unsqueeze(-2)
             core_attn_out[:, :, i] = (last_recurrent_state * q_t.unsqueeze(-1)).sum(dim=-2)
 
         core_attn_out = core_attn_out.transpose(1,2).contiguous().to(query.dtype)
